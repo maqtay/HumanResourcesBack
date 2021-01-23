@@ -1,17 +1,25 @@
 package com.maqtay.HumanResourcesBack.controller;
 
+import javax.servlet.http.HttpServletRequest;
 import javax.validation.*;
 
+import com.maqtay.HumanResourcesBack.models.ConfigurationToken;
 import com.maqtay.HumanResourcesBack.models.ERole;
 import com.maqtay.HumanResourcesBack.models.Role;
 import com.maqtay.HumanResourcesBack.models.User;
+import com.maqtay.HumanResourcesBack.repository.ConfirmationTokenRepository;
+import com.maqtay.HumanResourcesBack.security.services.EmailSenderService;
+import org.apache.logging.log4j.message.SimpleMessage;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.http.ResponseEntity;
+import org.springframework.mail.SimpleMailMessage;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.validation.Errors;
 import org.springframework.web.bind.annotation.*;
 
 import com.maqtay.HumanResourcesBack.payload.request.LoginRequest;
@@ -22,6 +30,7 @@ import com.maqtay.HumanResourcesBack.repository.RoleRepository;
 import com.maqtay.HumanResourcesBack.repository.UserRepository;
 import com.maqtay.HumanResourcesBack.security.jwt.JwtUtils;
 import com.maqtay.HumanResourcesBack.security.services.UserDetailsImpl;
+import org.springframework.web.servlet.ModelAndView;
 
 import java.util.HashSet;
 import java.util.List;
@@ -47,26 +56,39 @@ public class AuthController {
     @Autowired
     JwtUtils jwtUtils;
 
+    @Autowired
+    ConfirmationTokenRepository confirmationTokenRepository;
+
+    @Autowired
+    EmailSenderService emailSenderService;
+
     @PostMapping("/signin")
     public ResponseEntity<?> authenticateUser(@Valid @RequestBody LoginRequest loginRequest) {
-        Authentication authentication = authenticationManager.authenticate(
-                new UsernamePasswordAuthenticationToken(loginRequest.getUsername(), loginRequest.getPassword())
-        );
 
-        SecurityContextHolder.getContext().setAuthentication(authentication);
-        String jwt = jwtUtils.generateJwtToken(authentication);
+        User user = new User(loginRequest.getUsername(), loginRequest.getUsername(), loginRequest.getPassword());
+        if (user.isEnabled()) {
+            Authentication authentication = authenticationManager.authenticate(
+                    new UsernamePasswordAuthenticationToken(loginRequest.getUsername(), loginRequest.getPassword())
+            );
 
-        UserDetailsImpl userDetails = (UserDetailsImpl) authentication.getPrincipal();
-        List<String> roles = userDetails.getAuthorities().stream()
-                .map(item -> item.getAuthority())
-                .collect(Collectors.toList());
+            SecurityContextHolder.getContext().setAuthentication(authentication);
+            String jwt = jwtUtils.generateJwtToken(authentication);
 
-        return ResponseEntity.ok(new JwtResponse(jwt,
-                userDetails.getId(),
-                userDetails.getUsername(),
-                userDetails.getEmail(),
-                roles
-        ));
+            UserDetailsImpl userDetails = (UserDetailsImpl) authentication.getPrincipal();
+            List<String> roles = userDetails.getAuthorities().stream()
+                    .map(item -> item.getAuthority())
+                    .collect(Collectors.toList());
+
+            return ResponseEntity.ok(new JwtResponse(jwt,
+                    userDetails.getId(),
+                    userDetails.getUsername(),
+                    userDetails.getEmail(),
+                    roles
+            ));
+        } else {
+            return ResponseEntity.status(401).body("Email not verified!");
+        }
+
     }
 
     @PostMapping("/signup")
@@ -110,7 +132,6 @@ public class AuthController {
                         Role userRole = roleRepository.findByName(ERole.ROLE_USER)
                                 .orElseThrow(() -> new RuntimeException("Error: Role is not found!"));
                         roles.add(userRole);
-
                 }
             });
         }
@@ -118,6 +139,30 @@ public class AuthController {
         user.setRoles(roles);
         userRepository.save(user);
 
+        ConfigurationToken configurationToken = new ConfigurationToken(user);
+        confirmationTokenRepository.save(configurationToken);
+        SimpleMailMessage mailMessage = new SimpleMailMessage();
+        mailMessage.setTo(user.getEmail());
+        mailMessage.setSubject("Kayıt işlemini tamamla!");
+        mailMessage.setFrom("maktay3@gmail.com");
+        mailMessage.setText("Kayıt işlemini tamamlamak için lütfen aşağıdaki linke tıklayın. 24 saat sonra geçerliliği bitecektir. " +
+                "http://localhost:3306/confirm-account?token"+configurationToken.getConfirmationToken());
+        emailSenderService.sendMail(mailMessage);
+
         return ResponseEntity.ok(new MessageResponse("User registered successfully!"));
+    }
+
+    @RequestMapping(value = "confirm-account", method = {RequestMethod.GET, RequestMethod.POST})
+    public ResponseEntity<?> confirmUserAccount(@RequestParam("token")String confirmationToken) {
+        ConfigurationToken token = confirmationTokenRepository.findByConfirmationToken(confirmationToken);
+
+        if (token != null) {
+            User user = userRepository.findByEmail(token.getUser().getEmail());
+            user.setEnabled(true);
+            userRepository.save(user);
+            return ResponseEntity.ok(new MessageResponse("Email verification successfully!"));
+        } else {
+            return ResponseEntity.status(401).body("Email token verification failed!");
+        }
     }
 }
